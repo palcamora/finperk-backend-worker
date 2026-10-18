@@ -1,0 +1,37 @@
+name: CI — backend-worker
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-lint:
+    name: Go Vet & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout backend-worker
+        uses: actions/checkout@v4
+        with:
+          path: backend-worker
+
+      - name: Checkout pkg/gocardless
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/finperk-gocardless
+          path: pkg/gocardless
+        continue-on-error: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: backend-worker/go.sum
+
+      - name: Vet & Test (when run inside monorepo or with sibling pkg/gocardless)
+        if: hashFiles('pkg/gocardless/go.mod') != ''
+        working-directory: backend-worker
+        run: |
+          make vet
+          make test
