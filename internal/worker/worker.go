@@ -77,6 +77,7 @@ type Engine struct {
 	jevClient         *ai.JevClient
 	notifier          *notify.Dispatcher
 	store             repository.WorkerStore
+	bus               *NATSWorkerBus
 	locks             *AccountLockManager
 	schedulerInterval time.Duration
 	nowFunc           func() time.Time
@@ -107,6 +108,14 @@ func NewEngine(
 func (e *Engine) WithStore(store repository.WorkerStore) *Engine {
 	if store != nil {
 		e.store = store
+	}
+	return e
+}
+
+// WithNATSBus attaches a NATSWorkerBus to the Engine.
+func (e *Engine) WithNATSBus(bus *NATSWorkerBus) *Engine {
+	if bus != nil {
+		e.bus = bus
 	}
 	return e
 }
@@ -472,13 +481,105 @@ func PlanScheduledActions(now time.Time, accounts []repository.ActiveAccount) []
 	return actions
 }
 
-// Run loop starts the background scheduler until ctx is cancelled.
+// RunScheduledTick evaluates all active accounts and executes scheduled syncs and PSD2 consent alerts.
+func (e *Engine) RunScheduledTick(ctx context.Context) {
+	now := e.nowFunc()
+	accounts, err := e.store.ListActiveAccounts(ctx)
+	if err != nil {
+		slog.Error("failed to list active accounts for scheduler", "error", err)
+		return
+	}
+
+	accByID := make(map[string]repository.ActiveAccount, len(accounts))
+	for _, a := range accounts {
+		accByID[a.ID] = a
+	}
+
+	period := now.Format("2006-01")
+	actions := PlanScheduledActions(now, accounts)
+	for _, act := range actions {
+		acc := accByID[act.AccountID]
+		if act.MarkExpired {
+			_ = e.store.MarkAccountExpired(ctx, acc.ID)
+			if alert, created, _ := e.store.CreateConsentAlert(
+				ctx,
+				acc.UserID,
+				acc.ID,
+				"account_expired",
+				period,
+				"Your 90-day PSD2 bank connection has expired. Please reconnect your account.",
+			); created && alert != nil {
+				e.notifier.Deliver(ctx, notify.NotificationRequest{
+					UserID:   alert.UserID,
+					AlertID:  alert.ID,
+					Type:     alert.Type,
+					Channels: []string{"email", "push"},
+					Message:  alert.Message,
+				})
+			}
+			continue
+		}
+
+		if act.AlertExpiring {
+			if alert, created, _ := e.store.CreateConsentAlert(
+				ctx,
+				acc.UserID,
+				acc.ID,
+				"account_consent_expiring",
+				period,
+				"Your 90-day PSD2 bank connection expires in less than 7 days. Reconnect now to avoid interruption.",
+			); created && alert != nil {
+				e.notifier.Deliver(ctx, notify.NotificationRequest{
+					UserID:   alert.UserID,
+					AlertID:  alert.ID,
+					Type:     alert.Type,
+					Channels: []string{"email", "push"},
+					Message:  alert.Message,
+				})
+			}
+		}
+
+		if act.TriggerSync {
+			payload := SyncRequestPayload{
+				UserID:                  acc.UserID,
+				AccountID:               acc.ID,
+				GoCardlessRequisitionID: acc.GoCardlessRequisitionID,
+				GoCardlessAccountID:     acc.GoCardlessAccountID,
+			}
+			if e.bus != nil {
+				_ = e.bus.PublishSyncRequest(ctx, payload)
+			} else {
+				_ = e.ProcessSyncRequest(ctx, payload, nil)
+			}
+		}
+	}
+}
+
+// Run starts NATS JetStream consumers (if configured), the 12h account scheduler, and the 6h Jev retry job until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context) error {
-	ticker := time.NewTicker(e.schedulerInterval)
-	defer ticker.Stop()
+	if e.bus != nil {
+		if err := e.bus.StartConsumers(ctx, e); err != nil {
+			return err
+		}
+	}
+
+	schedTicker := time.NewTicker(e.schedulerInterval)
+	defer schedTicker.Stop()
+
+	jevRetryTicker := time.NewTicker(6 * time.Hour)
+	defer jevRetryTicker.Stop()
 
 	slog.Info("finperk backend-worker started", "scheduler_interval", e.schedulerInterval.String())
-	<-ctx.Done()
-	slog.Info("finperk backend-worker stopped")
-	return nil
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("finperk backend-worker stopped")
+			return nil
+		case <-schedTicker.C:
+			e.RunScheduledTick(ctx)
+		case <-jevRetryTicker.C:
+			_, _ = e.RetryUncategorized(ctx)
+		}
+	}
 }
+
