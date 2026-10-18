@@ -31,13 +31,14 @@ backend-worker/
    - **Pending**: Use `gocardless.DeterministicPendingID` if GoCardless omits `transactionId`. Pending transactions are stored with `is_pending: true` and **excluded** from `spending_summaries` and budget alerts until booked.
 4. **Internal Transfer Detection** (`internal/dedup`):
    - Detect mirror transactions across two accounts belonging to the same user (`amount_A == -amount_B` within $\pm 2$ days) or matching self-transfer patterns (`traspaso propio`, `bizum a mi mismo`). Mark `is_internal_transfer: true` and assign category `transferencias` so they do not inflate income/expense totals.
-5. **3-Tier Categorization Pipeline with Jev** (`internal/ai/jev.go`):
-   - **Tier 1 (`manual`)**: Exact match on normalized description against the user's prior manual recategorizations in MongoDB (`categorization_source: "manual"`).
-   - **Tier 2 (`keyword`)**: Deterministic match against global category `keywords`.
-   - **Tier 3 (`jev`)**: Batch call to **Jev** (`POST ${JEV_API_URL}/v1/classify` with `JEV_API_KEY`) passing remaining descriptions and candidate category slugs. Falls back to `"otros"` if confidence is low or Jev is unavailable.
-6. **Atomic MongoDB Persistence & Alert Deduplication** (`internal/repository`):
+5. **3-Tier Categorization Pipeline with Jev (Native or OpenRouter)** (`internal/ai/jev.go`):
+   - **Tier 1 (`manual`)**: Exact match on normalized description or creditor against the user's prior manual recategorizations in MongoDB (`category_source: "manual"`).
+   - **Tier 2 (`keyword`)**: Deterministic match against global category `keywords` (`category_source: "keyword"`).
+   - **Tier 3 (`jev`)**: Calls **Jev** either via its native decisions API (`JEV_PROVIDER=jev`) or via **OpenRouter** (`JEV_PROVIDER=openrouter`, `JEV_MODEL`, `https://openrouter.ai/api/v1/chat/completions`) passing constrained global category IDs. Stores `category_id: nil` for retry if unreachable.
+6. **Atomic MongoDB Persistence, Alert Deduplication & Optional Notifications** (`internal/repository`, `internal/notify`):
    - Save new transactions, remove reconciled pending transactions, update account balance, and rebuild `spending_summaries` inside a single MongoDB ACID session.
-   - Budget alerts (`budget_warning` at 80%, `budget_exceeded` at 100%) are deduplicated by `user_id + budget_id + type + period (YYYY-MM)` so the user is notified at most once per threshold per month.
+   - Budget alerts (`budget_threshold` at 80%, `budget_exceeded` at 100%) are deduplicated by `user_id + budget_id + type + period (YYYY-MM)` and always saved in MongoDB for in-app viewing.
+   - External notifications (SMTP email, FCM Android, APNs iOS) are strictly optional (`NOTIFICATIONS_ENABLED=false` by default) and each channel activates only if its credentials are provided.
 
 ## Commands
 
