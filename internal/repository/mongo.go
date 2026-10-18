@@ -49,6 +49,14 @@ func (s *MongoWorkerStore) Close(ctx context.Context) error {
 	return s.client.Disconnect(ctx)
 }
 
+// Database returns the underlying *mongo.Database handle (e.g. for shared GoCardless MongoTokenStore).
+func (s *MongoWorkerStore) Database() *mongo.Database {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
+
 type mongoAccountDoc struct {
 	ID                      string     `bson:"_id"`
 	UserID                  string     `bson:"user_id"`

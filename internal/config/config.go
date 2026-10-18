@@ -8,22 +8,25 @@ import (
 
 // Config holds the runtime configuration for backend-worker.
 type Config struct {
-	MongoDBURI          string
-	GoCardlessSecretID  string
-	GoCardlessSecretKey string
-	JevAPIKey           string
-	JevAPIURL           string
-	NATSURL             string
-	SMTPHost            string
-	SMTPPort            int
-	SMTPUser            string
-	SMTPPassword        string
-	SMTPFrom            string
-	FCMCredentialsPath  string
-	APNSKeyPath         string
-	APNSKeyID           string
-	APNSTeamID          string
-	SchedulerInterval   time.Duration
+	MongoDBURI           string
+	GoCardlessSecretID   string
+	GoCardlessSecretKey  string
+	GoCardlessTokenStore string
+	JevProvider          string
+	JevModel             string
+	JevAPIKey            string
+	JevAPIURL            string
+	NATSURL              string
+	SMTPHost             string
+	SMTPPort             int
+	SMTPUser             string
+	SMTPPassword         string
+	SMTPFrom             string
+	FCMCredentialsPath   string
+	APNSKeyPath          string
+	APNSKeyID            string
+	APNSTeamID           string
+	SchedulerInterval    time.Duration
 }
 
 // Load reads environment variables and returns a populated worker Config.
@@ -38,22 +41,25 @@ func Load() Config {
 	}
 
 	return Config{
-		MongoDBURI:          getEnv("MONGODB_URI", "mongodb://localhost:27017/finperk?replicaSet=rs0"),
-		GoCardlessSecretID:  getEnv("GOCARDLESS_SECRET_ID", ""),
-		GoCardlessSecretKey: getEnv("GOCARDLESS_SECRET_KEY", ""),
-		JevAPIKey:           getEnv("JEV_API_KEY", ""),
-		JevAPIURL:           getEnv("JEV_API_URL", "https://api.jevfast.com/v1/decisions"),
-		NATSURL:             getEnv("NATS_URL", "nats://localhost:4222"),
-		SMTPHost:            getEnv("SMTP_HOST", "smtp.example.com"),
-		SMTPPort:            smtpPort,
-		SMTPUser:            getEnv("SMTP_USER", ""),
-		SMTPPassword:        getEnv("SMTP_PASSWORD", ""),
-		SMTPFrom:            getEnv("SMTP_FROM", "noreply@finperk.app"),
-		FCMCredentialsPath:  getEnv("FCM_CREDENTIALS_PATH", "/etc/finperk/fcm-credentials.json"),
-		APNSKeyPath:         getEnv("APNS_KEY_PATH", "/etc/finperk/apns-key.p8"),
-		APNSKeyID:           getEnv("APNS_KEY_ID", ""),
-		APNSTeamID:          getEnv("APNS_TEAM_ID", ""),
-		SchedulerInterval:   schedInt,
+		MongoDBURI:           getEnv("MONGODB_URI", "mongodb://localhost:27017/finperk?replicaSet=rs0"),
+		GoCardlessSecretID:   getEnv("GOCARDLESS_SECRET_ID", ""),
+		GoCardlessSecretKey:  getEnv("GOCARDLESS_SECRET_KEY", ""),
+		GoCardlessTokenStore: getEnv("GOCARDLESS_TOKEN_STORE", "nats"),
+		JevProvider:          getEnv("JEV_PROVIDER", ""),
+		JevModel:             getEnv("JEV_MODEL", ""),
+		JevAPIKey:            getEnv("JEV_API_KEY", ""),
+		JevAPIURL:            getEnv("JEV_API_URL", "https://api.jevfast.com/v1/decisions"),
+		NATSURL:              getEnv("NATS_URL", "nats://localhost:4222"),
+		SMTPHost:             getEnv("SMTP_HOST", "smtp.example.com"),
+		SMTPPort:             smtpPort,
+		SMTPUser:             getEnv("SMTP_USER", ""),
+		SMTPPassword:         getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:             getEnv("SMTP_FROM", "noreply@finperk.app"),
+		FCMCredentialsPath:   getEnv("FCM_CREDENTIALS_PATH", "/etc/finperk/fcm-credentials.json"),
+		APNSKeyPath:          getEnv("APNS_KEY_PATH", "/etc/finperk/apns-key.p8"),
+		APNSKeyID:            getEnv("APNS_KEY_ID", ""),
+		APNSTeamID:           getEnv("APNS_TEAM_ID", ""),
+		SchedulerInterval:    schedInt,
 	}
 }
 

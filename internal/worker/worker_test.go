@@ -81,6 +81,61 @@ func TestThreeTierJevCategorization(t *testing.T) {
 	}
 }
 
+func TestOpenRouterCategorization(t *testing.T) {
+	var capturedAuth, capturedModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		capturedModel = body.Model
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{
+					"message": map[string]string{
+						"role":    "assistant",
+						"content": "```json\n{\"category\": \"cat_health\"}\n```",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	jevClient := ai.NewJevClient(
+		srv.URL+"/api/v1/chat/completions",
+		"or-test-key",
+		srv.Client(),
+		ai.WithProvider(ai.ProviderOpenRouter),
+		ai.WithModel("jev/jev-decision-v1"),
+	)
+
+	if jevClient.Provider() != ai.ProviderOpenRouter {
+		t.Fatalf("expected provider %q, got %q", ai.ProviderOpenRouter, jevClient.Provider())
+	}
+
+	categories := []ai.CategoryOption{
+		{ID: "cat_shopping", Name: "Shopping", Keywords: []string{"mercadona"}},
+		{ID: "cat_health", Name: "Health", Keywords: []string{"farmacia"}},
+	}
+	inputs := []ai.TransactionInput{
+		{ID: "tx-or-1", Description: "CLINICA OFTALMOLOGICA", AmountCents: -9500},
+	}
+
+	res := jevClient.Classify(context.Background(), inputs, nil, categories)
+	if res["tx-or-1"].CategoryID == nil || *res["tx-or-1"].CategoryID != "cat_health" || *res["tx-or-1"].CategorySource != ai.SourceJev {
+		t.Fatalf("expected tx-or-1 to be classified via OpenRouter as cat_health, got %+v", res["tx-or-1"])
+	}
+	if capturedAuth != "Bearer or-test-key" {
+		t.Fatalf("expected Authorization header 'Bearer or-test-key', got %q", capturedAuth)
+	}
+	if capturedModel != "jev/jev-decision-v1" {
+		t.Fatalf("expected OpenRouter model 'jev/jev-decision-v1', got %q", capturedModel)
+	}
+}
+
 func TestFuzzyPendingReconciliation(t *testing.T) {
 	day1 := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
 	day2 := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
