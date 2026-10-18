@@ -17,6 +17,7 @@ type Config struct {
 	JevAPIKey            string
 	JevAPIURL            string
 	NATSURL              string
+	NotificationsEnabled bool
 	SMTPHost             string
 	SMTPPort             int
 	SMTPUser             string
@@ -39,6 +40,10 @@ func Load() Config {
 	if err != nil {
 		schedInt = 12 * time.Hour
 	}
+	notifEnabled, err := strconv.ParseBool(getEnv("NOTIFICATIONS_ENABLED", "false"))
+	if err != nil {
+		notifEnabled = false
+	}
 
 	return Config{
 		MongoDBURI:           getEnv("MONGODB_URI", "mongodb://localhost:27017/finperk?replicaSet=rs0"),
@@ -50,13 +55,14 @@ func Load() Config {
 		JevAPIKey:            getEnv("JEV_API_KEY", ""),
 		JevAPIURL:            getEnv("JEV_API_URL", "https://api.jevfast.com/v1/decisions"),
 		NATSURL:              getEnv("NATS_URL", "nats://localhost:4222"),
-		SMTPHost:             getEnv("SMTP_HOST", "smtp.example.com"),
+		NotificationsEnabled: notifEnabled,
+		SMTPHost:             getEnv("SMTP_HOST", ""),
 		SMTPPort:             smtpPort,
 		SMTPUser:             getEnv("SMTP_USER", ""),
 		SMTPPassword:         getEnv("SMTP_PASSWORD", ""),
-		SMTPFrom:             getEnv("SMTP_FROM", "noreply@finperk.app"),
-		FCMCredentialsPath:   getEnv("FCM_CREDENTIALS_PATH", "/etc/finperk/fcm-credentials.json"),
-		APNSKeyPath:          getEnv("APNS_KEY_PATH", "/etc/finperk/apns-key.p8"),
+		SMTPFrom:             getEnv("SMTP_FROM", ""),
+		FCMCredentialsPath:   getEnv("FCM_CREDENTIALS_PATH", ""),
+		APNSKeyPath:          getEnv("APNS_KEY_PATH", ""),
 		APNSKeyID:            getEnv("APNS_KEY_ID", ""),
 		APNSTeamID:           getEnv("APNS_TEAM_ID", ""),
 		SchedulerInterval:    schedInt,

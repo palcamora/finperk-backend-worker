@@ -275,17 +275,19 @@ func (e *Engine) ExecuteSync(ctx context.Context, req SyncRequestPayload) (*Sync
 		return nil, err
 	}
 
-	// 6. Evaluate budget thresholds (80% warning & 100% exceeded) and dispatch notifications
+	// 6. Evaluate budget thresholds (80% warning & 100% exceeded) and dispatch optional external notifications
 	currentPeriod := now.Format("2006-01")
 	alerts, _ := e.store.EvaluateAndCreateBudgetAlerts(ctx, req.UserID, currentPeriod)
-	for _, a := range alerts {
-		e.notifier.Deliver(ctx, notify.NotificationRequest{
-			UserID:   a.UserID,
-			AlertID:  a.ID,
-			Type:     a.Type,
-			Channels: []string{"email", "push"},
-			Message:  a.Message,
-		})
+	if e.notifier != nil && e.notifier.Enabled() {
+		for _, a := range alerts {
+			e.notifier.Deliver(ctx, notify.NotificationRequest{
+				UserID:   a.UserID,
+				AlertID:  a.ID,
+				Type:     a.Type,
+				Channels: []string{"email", "push"},
+				Message:  a.Message,
+			})
+		}
 	}
 
 	return &SyncExecutionReport{
@@ -356,7 +358,7 @@ func (e *Engine) handleSyncError(ctx context.Context, req SyncRequestPayload, er
 				"account_expired",
 				period,
 				"Your 90-day PSD2 bank connection has expired. Please reconnect your account.",
-			); created && alert != nil {
+			); created && alert != nil && e.notifier != nil && e.notifier.Enabled() {
 				e.notifier.Deliver(ctx, notify.NotificationRequest{
 					UserID:   alert.UserID,
 					AlertID:  alert.ID,
@@ -508,7 +510,7 @@ func (e *Engine) RunScheduledTick(ctx context.Context) {
 				"account_expired",
 				period,
 				"Your 90-day PSD2 bank connection has expired. Please reconnect your account.",
-			); created && alert != nil {
+			); created && alert != nil && e.notifier != nil && e.notifier.Enabled() {
 				e.notifier.Deliver(ctx, notify.NotificationRequest{
 					UserID:   alert.UserID,
 					AlertID:  alert.ID,
@@ -528,7 +530,7 @@ func (e *Engine) RunScheduledTick(ctx context.Context) {
 				"account_consent_expiring",
 				period,
 				"Your 90-day PSD2 bank connection expires in less than 7 days. Reconnect now to avoid interruption.",
-			); created && alert != nil {
+			); created && alert != nil && e.notifier != nil && e.notifier.Enabled() {
 				e.notifier.Deliver(ctx, notify.NotificationRequest{
 					UserID:   alert.UserID,
 					AlertID:  alert.ID,

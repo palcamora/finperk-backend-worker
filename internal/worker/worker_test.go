@@ -136,6 +136,46 @@ func TestOpenRouterCategorization(t *testing.T) {
 	}
 }
 
+func TestOptionalNotifications(t *testing.T) {
+	disabledDisp := notify.NewDispatcherFromConfig(notify.Config{
+		Enabled: false,
+	})
+	if disabledDisp.Enabled() || disabledDisp.EmailEnabled() || disabledDisp.PushEnabled() {
+		t.Fatalf("expected all notification channels to be disabled when Enabled=false")
+	}
+
+	res := disabledDisp.Deliver(context.Background(), notify.NotificationRequest{
+		UserID:   "u-1",
+		AlertID:  "a-1",
+		Type:     "budget_exceeded",
+		Channels: []string{"email", "push"},
+		Message:  "Budget exceeded",
+	})
+	if res["email"] != "skipped_disabled" || res["push"] != "skipped_disabled" {
+		t.Fatalf("expected skipped_disabled for both channels, got %+v", res)
+	}
+
+	emailOnlyDisp := notify.NewDispatcherFromConfig(notify.Config{
+		Enabled:  true,
+		SMTPHost: "smtp.finperk.es",
+		SMTPPort: 587,
+		SMTPFrom: "noreply@finperk.es",
+	})
+	if !emailOnlyDisp.EmailEnabled() || emailOnlyDisp.PushEnabled() {
+		t.Fatalf("expected EmailEnabled=true and PushEnabled=false when only SMTP is configured")
+	}
+	res2 := emailOnlyDisp.Deliver(context.Background(), notify.NotificationRequest{
+		UserID:   "u-1",
+		AlertID:  "a-2",
+		Type:     "budget_threshold",
+		Channels: []string{"email", "push"},
+		Message:  "Budget 80%%",
+	})
+	if res2["email"] != "sent" || res2["push"] != "skipped_unconfigured" {
+		t.Fatalf("expected email=sent and push=skipped_unconfigured, got %+v", res2)
+	}
+}
+
 func TestFuzzyPendingReconciliation(t *testing.T) {
 	day1 := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
 	day2 := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)

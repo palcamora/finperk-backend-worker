@@ -72,7 +72,24 @@ func main() {
 	)
 	slog.Info("configured Jev AI categorizer", "provider", jevClient.Provider(), "model", jevClient.Model())
 
-	notifier := notify.NewDispatcher(cfg.SMTPFrom)
+	notifier := notify.NewDispatcherFromConfig(notify.Config{
+		Enabled:            cfg.NotificationsEnabled,
+		SMTPHost:           cfg.SMTPHost,
+		SMTPPort:           cfg.SMTPPort,
+		SMTPUser:           cfg.SMTPUser,
+		SMTPPassword:       cfg.SMTPPassword,
+		SMTPFrom:           cfg.SMTPFrom,
+		FCMCredentialsPath: cfg.FCMCredentialsPath,
+		APNSKeyPath:        cfg.APNSKeyPath,
+		APNSKeyID:          cfg.APNSKeyID,
+		APNSTeamID:         cfg.APNSTeamID,
+	})
+	slog.Info("configured notification dispatcher",
+		"enabled", notifier.Enabled(),
+		"email_enabled", notifier.EmailEnabled(),
+		"push_enabled", notifier.PushEnabled(),
+	)
+
 	eng := worker.NewEngine(gcClient, jevClient, notifier, cfg.SchedulerInterval).WithNATSBus(natsBus)
 	if mongoErr == nil {
 		eng.WithStore(mongoStore)
