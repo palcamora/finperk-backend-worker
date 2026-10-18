@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,5 +164,130 @@ func TestPlanScheduledActions(t *testing.T) {
 	}
 	if !actions[2].MarkExpired {
 		t.Fatalf("expected acc-expired to be marked expired")
+	}
+}
+
+func TestEndToEndExecuteSyncPipelineAndBudgetAlerts(t *testing.T) {
+	now := time.Now().UTC()
+	dateStr := now.Format("2006-01-02")
+	period := now.Format("2006-01")
+
+	// Mock GoCardless API server
+	gcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("HTTP_X_RATELIMIT_LIMIT", "4")
+		w.Header().Set("HTTP_X_RATELIMIT_REMAINING", "3")
+		w.Header().Set("HTTP_X_RATELIMIT_ACCOUNT_SUCCESS_RESET", "21600")
+
+		switch {
+		case r.URL.Path == "/token/new/":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access":          "gc-access-tok",
+				"access_expires":  86400,
+				"refresh":         "gc-refresh-tok",
+				"refresh_expires": 2592000,
+			})
+		case strings.HasSuffix(r.URL.Path, "/balances/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"balances": []map[string]any{
+					{
+						"balanceAmount": map[string]string{"amount": "2450.75", "currency": "EUR"},
+						"balanceType":   "closingBooked",
+					},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/transactions/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"transactions": map[string]any{
+					"booked": []map[string]any{
+						{
+							"transactionId":                     "tx_booked_salary",
+							"bookingDate":                       dateStr,
+							"transactionAmount":                 map[string]string{"amount": "2500.00", "currency": "EUR"},
+							"remittanceInformationUnstructured": "NOMINA EMPRESA SL",
+						},
+						{
+							"transactionId":                     "tx_booked_mercadona",
+							"bookingDate":                       dateStr,
+							"transactionAmount":                 map[string]string{"amount": "-85.00", "currency": "EUR"},
+							"remittanceInformationUnstructured": "COMPRA MERCADONA",
+						},
+						{
+							"transactionId":                     "tx_booked_internal",
+							"bookingDate":                       dateStr,
+							"transactionAmount":                 map[string]string{"amount": "-500.00", "currency": "EUR"},
+							"remittanceInformationUnstructured": "TRASPASO PROPIO A CUENTA AHORRO",
+						},
+					},
+					"pending": []map[string]any{
+						{
+							// Pending without transactionId -> uses DeterministicPendingID
+							"valueDate":                         dateStr,
+							"transactionAmount":                 map[string]string{"amount": "-12.50", "currency": "EUR"},
+							"remittanceInformationUnstructured": "CAFE PENDIENTE",
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected GoCardless call: %s", r.URL.Path)
+		}
+	}))
+	defer gcSrv.Close()
+
+	// Mock Jev server
+	jevSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"category": "cat_others"})
+	}))
+	defer jevSrv.Close()
+
+	store := repository.NewMemoryWorkerStore()
+	store.SeedAccount(repository.ActiveAccount{
+		ID:                  "acc-1",
+		UserID:              "user-1",
+		IBAN:                "ES9121000418450200051332",
+		GoCardlessAccountID: "gc-acc-1",
+		Status:              "enabled",
+	})
+	// Seed a budget of 10000 cents (100.00 EUR) for cat_shopping -> -8500 cents is 85% -> triggers budget_threshold
+	store.SeedBudget(repository.BudgetRecord{
+		ID:         "bud-1",
+		UserID:     "user-1",
+		CategoryID: "cat_shopping",
+		Amount:     10000,
+	})
+
+	gcClient := gocardless.NewClient("sec-id", "sec-key", gocardless.WithBaseURL(gcSrv.URL), gocardless.WithHTTPClient(gcSrv.Client()))
+	jevClient := ai.NewJevClient(jevSrv.URL, "jev-key", jevSrv.Client())
+	eng := NewEngine(gcClient, jevClient, notify.NewDispatcher("noreply@finperk.app"), 12*time.Hour).WithStore(store)
+
+	report, err := eng.ExecuteSync(context.Background(), SyncRequestPayload{
+		SyncID:              "sync-100",
+		UserID:              "user-1",
+		AccountID:           "acc-1",
+		GoCardlessAccountID: "gc-acc-1",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteSync failed: %v", err)
+	}
+	if report.BalanceCents != 245075 {
+		t.Fatalf("expected balance 245075 cents, got %d", report.BalanceCents)
+	}
+	if report.TransactionsFetched != 4 || report.TransactionsNew != 4 {
+		t.Fatalf("expected 4 fetched & 4 new transactions, got %+v", report)
+	}
+	if report.AlertsCreated != 1 {
+		t.Fatalf("expected 1 budget_threshold alert created, got %d", report.AlertsCreated)
+	}
+
+	// Verify spending summary excludes both pending (-1250) and internal transfer (-50000) from TotalExpenses
+	sum := store.GetSpendingSummary("user-1", period)
+	if sum == nil {
+		t.Fatalf("expected spending summary for period %s", period)
+	}
+	if sum.TotalIncome != 250000 {
+		t.Fatalf("expected TotalIncome 250000 cents, got %d", sum.TotalIncome)
+	}
+	if sum.TotalExpenses != 8500 {
+		t.Fatalf("expected TotalExpenses 8500 cents (excluding internal transfer & pending), got %d", sum.TotalExpenses)
 	}
 }

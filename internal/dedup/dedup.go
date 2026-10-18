@@ -14,6 +14,9 @@ type StoredTransaction struct {
 	AmountCents             int64
 	Description             string
 	CreditorName            string
+	CategoryID              *string
+	CategorySource          *string
+	IsInternalTransfer      bool
 	IsPending               bool
 	PendingSyncCount        int
 }
@@ -25,19 +28,23 @@ type IncomingTransaction struct {
 	BookingDate             time.Time
 	ValueDate               time.Time
 	AmountCents             int64
+	BalanceAfterCents       int64
 	Currency                string
 	Description             string
 	CreditorName            string
+	CreditorIBAN            string
 	DebtorName              string
+	DebtorIBAN              string
+	BankTransactionCode     string
 	IsPending               bool
 }
 
 // ReconciliationResult describes the actions to apply inside the worker's atomic MongoDB session.
 type ReconciliationResult struct {
-	NewTransactions        []IncomingTransaction
-	PromotedPendingToBook  map[string]IncomingTransaction // stored ID -> booked IncomingTransaction
-	IncrementedPendingIDs  []string                       // stored IDs that remain pending
-	DeletedPendingIDs      []string                       // stored IDs of pending transactions that disappeared
+	NewTransactions       []IncomingTransaction
+	PromotedPendingToBook map[string]IncomingTransaction // stored ID -> booked IncomingTransaction
+	IncrementedPendingIDs []string                       // stored IDs that remain pending
+	DeletedPendingIDs     []string                       // stored IDs of pending transactions that disappeared
 }
 
 // Reconcile compares incoming booked and pending transactions from GoCardless against stored transactions.
@@ -113,6 +120,35 @@ func Reconcile(existing []StoredTransaction, incomingBooked, incomingPending []I
 	}
 
 	return res
+}
+
+// IsInternalTransfer detects whether a transaction is a transfer between the user's own connected accounts
+// (matching DebtorIBAN or CreditorIBAN against userIBANs, or explicit self-transfer descriptions).
+func IsInternalTransfer(tx IncomingTransaction, userIBANs map[string]bool) bool {
+	normIBAN := func(s string) string {
+		return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(s), " ", ""))
+	}
+	if len(userIBANs) > 0 {
+		if c := normIBAN(tx.CreditorIBAN); c != "" && userIBANs[c] {
+			return true
+		}
+		if d := normIBAN(tx.DebtorIBAN); d != "" && userIBANs[d] {
+			return true
+		}
+	}
+	desc := norm(tx.Description)
+	selfPatterns := []string{
+		"traspaso propio",
+		"transferencia propia",
+		"traspaso entre mis cuentas",
+		"bizum a mi mismo",
+	}
+	for _, pat := range selfPatterns {
+		if strings.Contains(desc, pat) {
+			return true
+		}
+	}
+	return false
 }
 
 func findFuzzyBookedMatch(pending StoredTransaction, booked []IncomingTransaction, used map[int]bool) (int, bool) {

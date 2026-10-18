@@ -3,11 +3,14 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"backend-worker/internal/ai"
+	"backend-worker/internal/dedup"
 	"backend-worker/internal/notify"
 	"backend-worker/internal/repository"
 	"pkg/gocardless"
@@ -24,6 +27,16 @@ type SyncRequestPayload struct {
 	AccountID               string `json:"account_id"`
 	GoCardlessRequisitionID string `json:"gocardless_requisition_id"`
 	GoCardlessAccountID     string `json:"gocardless_account_id"`
+}
+
+// SyncExecutionReport summarizes the result of a completed sync pipeline run.
+type SyncExecutionReport struct {
+	TransactionsFetched int
+	TransactionsNew     int
+	PromotedCount       int
+	DeletedPendingCount int
+	BalanceCents        int64
+	AlertsCreated       int
 }
 
 // AccountLockManager manages per-account concurrency locks so two syncs for the same
@@ -63,8 +76,10 @@ type Engine struct {
 	gcClient          *gocardless.Client
 	jevClient         *ai.JevClient
 	notifier          *notify.Dispatcher
+	store             repository.WorkerStore
 	locks             *AccountLockManager
 	schedulerInterval time.Duration
+	nowFunc           func() time.Time
 }
 
 // NewEngine constructs a new worker Engine.
@@ -81,9 +96,19 @@ func NewEngine(
 		gcClient:          gcClient,
 		jevClient:         jevClient,
 		notifier:          notifier,
+		store:             repository.NewMemoryWorkerStore(),
 		locks:             NewAccountLockManager(),
 		schedulerInterval: schedulerInterval,
+		nowFunc:           func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// WithStore attaches a custom WorkerStore to the Engine.
+func (e *Engine) WithStore(store repository.WorkerStore) *Engine {
+	if store != nil {
+		e.store = store
+	}
+	return e
 }
 
 // ProcessSyncRequest handles an incoming finperk.sync.request message with per-account locking.
@@ -101,14 +126,315 @@ func (e *Engine) ProcessSyncRequest(ctx context.Context, req SyncRequestPayload,
 	if fn != nil {
 		return fn(ctx, req)
 	}
-	return nil
+	_, err := e.ExecuteSync(ctx, req)
+	return err
+}
+
+// ExecuteSync runs the complete GoCardless -> Dedup -> InternalTransfer -> 3-Tier Jev -> Atomic DB -> Alerts pipeline.
+// Note: Regular syncs only call /balances/ and /transactions/ (never /details/) to conserve GoCardless rate limits.
+func (e *Engine) ExecuteSync(ctx context.Context, req SyncRequestPayload) (*SyncExecutionReport, error) {
+	now := e.nowFunc()
+
+	// 1. Fetch account balances from GoCardless
+	balances, balRL, err := e.gcClient.GetBalances(ctx, req.GoCardlessAccountID)
+	if err != nil {
+		e.handleSyncError(ctx, req, err)
+		return nil, err
+	}
+
+	var balanceCents int64
+	for _, b := range balances {
+		if cents, parseErr := gocardless.ParseAmountToCents(b.BalanceAmount.Amount); parseErr == nil {
+			balanceCents = cents
+			if b.BalanceType == "closingBooked" || b.BalanceType == "expected" {
+				break
+			}
+		}
+	}
+
+	// 2. Fetch booked and pending transactions from GoCardless
+	txList, txRL, err := e.gcClient.GetTransactions(ctx, req.GoCardlessAccountID, "", "")
+	if err != nil {
+		e.handleSyncError(ctx, req, err)
+		return nil, err
+	}
+
+	incomingBooked := make([]dedup.IncomingTransaction, 0, len(txList.Booked))
+	for _, b := range txList.Booked {
+		incomingBooked = append(incomingBooked, mapGoCardlessTransaction(req.AccountID, b, false, now))
+	}
+
+	incomingPending := make([]dedup.IncomingTransaction, 0, len(txList.Pending))
+	for _, p := range txList.Pending {
+		incomingPending = append(incomingPending, mapGoCardlessTransaction(req.AccountID, p, true, now))
+	}
+
+	// 3. Reconcile against existing transactions in DB (exact ID + ±3 day fuzzy match for pending -> booked)
+	existing, err := e.store.ListAccountTransactions(ctx, req.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	rec := dedup.Reconcile(existing, incomingBooked, incomingPending)
+
+	// 4. Detect internal transfers and classify remaining transactions via 3-tier pipeline (Manual -> Keyword -> Jev)
+	userIBANs, _ := e.store.ListUserIBANs(ctx, req.UserID)
+	manualRules, _ := e.store.ListManualRules(ctx, req.UserID)
+	categories, _ := e.store.ListCategories(ctx)
+
+	var toClassify []ai.TransactionInput
+	for i, nt := range rec.NewTransactions {
+		if nt.IsPending || dedup.IsInternalTransfer(nt, userIBANs) {
+			continue
+		}
+		toClassify = append(toClassify, ai.TransactionInput{
+			ID:          fmt.Sprintf("new_%d", i),
+			Description: nt.Description,
+			Creditor:    nt.CreditorName,
+			AmountCents: nt.AmountCents,
+		})
+	}
+	for storedID, pt := range rec.PromotedPendingToBook {
+		if dedup.IsInternalTransfer(pt, userIBANs) {
+			continue
+		}
+		toClassify = append(toClassify, ai.TransactionInput{
+			ID:          "prom_" + storedID,
+			Description: pt.Description,
+			Creditor:    pt.CreditorName,
+			AmountCents: pt.AmountCents,
+		})
+	}
+
+	classifications := e.jevClient.Classify(ctx, toClassify, manualRules, categories)
+
+	catTransfers := "cat_transfers"
+	srcKeyword := ai.SourceKeyword
+
+	classifiedNew := make([]repository.ClassifiedTransaction, 0, len(rec.NewTransactions))
+	for i, nt := range rec.NewTransactions {
+		ct := repository.ClassifiedTransaction{Incoming: nt}
+		if !nt.IsPending {
+			if dedup.IsInternalTransfer(nt, userIBANs) {
+				ct.IsInternalTransfer = true
+				ct.CategoryID = &catTransfers
+				ct.CategorySource = &srcKeyword
+			} else if res, ok := classifications[fmt.Sprintf("new_%d", i)]; ok {
+				ct.CategoryID = res.CategoryID
+				ct.CategorySource = res.CategorySource
+				if ct.CategoryID != nil && *ct.CategoryID == "cat_transfers" {
+					ct.IsInternalTransfer = true
+				}
+			}
+		}
+		classifiedNew = append(classifiedNew, ct)
+	}
+
+	classifiedPromoted := make(map[string]repository.ClassifiedTransaction, len(rec.PromotedPendingToBook))
+	for storedID, pt := range rec.PromotedPendingToBook {
+		ct := repository.ClassifiedTransaction{Incoming: pt}
+		if dedup.IsInternalTransfer(pt, userIBANs) {
+			ct.IsInternalTransfer = true
+			ct.CategoryID = &catTransfers
+			ct.CategorySource = &srcKeyword
+		} else if res, ok := classifications["prom_"+storedID]; ok {
+			ct.CategoryID = res.CategoryID
+			ct.CategorySource = res.CategorySource
+			if ct.CategoryID != nil && *ct.CategoryID == "cat_transfers" {
+				ct.IsInternalTransfer = true
+			}
+		}
+		classifiedPromoted[storedID] = ct
+	}
+
+	// 5. Persist everything atomically in MongoDB session
+	totalFetched := len(incomingBooked) + len(incomingPending)
+	outcome := repository.SyncOutcome{
+		SyncID:                 req.SyncID,
+		UserID:                 req.UserID,
+		AccountID:              req.AccountID,
+		BalanceCents:           balanceCents,
+		TransactionsFetched:    totalFetched,
+		TransactionsRateLimits: txRL,
+		BalancesRateLimits:     balRL,
+		NewTransactions:        classifiedNew,
+		PromotedPendingToBook:  classifiedPromoted,
+		IncrementedPendingIDs:  rec.IncrementedPendingIDs,
+		DeletedPendingIDs:      rec.DeletedPendingIDs,
+		CompletedAt:            now,
+	}
+	if err := e.store.ApplySyncOutcome(ctx, outcome); err != nil {
+		return nil, err
+	}
+
+	// 6. Evaluate budget thresholds (80% warning & 100% exceeded) and dispatch notifications
+	currentPeriod := now.Format("2006-01")
+	alerts, _ := e.store.EvaluateAndCreateBudgetAlerts(ctx, req.UserID, currentPeriod)
+	for _, a := range alerts {
+		e.notifier.Deliver(ctx, notify.NotificationRequest{
+			UserID:   a.UserID,
+			AlertID:  a.ID,
+			Type:     a.Type,
+			Channels: []string{"email", "push"},
+			Message:  a.Message,
+		})
+	}
+
+	return &SyncExecutionReport{
+		TransactionsFetched: totalFetched,
+		TransactionsNew:     len(classifiedNew),
+		PromotedCount:       len(classifiedPromoted),
+		DeletedPendingCount: len(rec.DeletedPendingIDs),
+		BalanceCents:        balanceCents,
+		AlertsCreated:       len(alerts),
+	}, nil
+}
+
+// RetryUncategorized re-runs the 3-tier Jev classification pipeline on booked transactions
+// that were stored with category_id == nil because Jev was temporarily unreachable.
+func (e *Engine) RetryUncategorized(ctx context.Context) (int, error) {
+	uncat, err := e.store.ListUncategorizedBooked(ctx)
+	if err != nil || len(uncat) == 0 {
+		return 0, err
+	}
+
+	categories, err := e.store.ListCategories(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	// Group by user so each user's manual rules are applied first
+	byUser := make(map[string][]ai.TransactionInput)
+	for _, u := range uncat {
+		byUser[u.UserID] = append(byUser[u.UserID], ai.TransactionInput{
+			ID:          u.ID,
+			Description: u.Description,
+			Creditor:    u.Creditor,
+			AmountCents: u.AmountCents,
+		})
+	}
+
+	allUpdates := make(map[string]ai.ClassificationResult)
+	for userID, inputs := range byUser {
+		manualRules, _ := e.store.ListManualRules(ctx, userID)
+		res := e.jevClient.Classify(ctx, inputs, manualRules, categories)
+		for txID, cr := range res {
+			if cr.CategoryID != nil {
+				allUpdates[txID] = cr
+			}
+		}
+	}
+
+	if len(allUpdates) > 0 {
+		if err := e.store.ApplyRetriedCategories(ctx, allUpdates); err != nil {
+			return 0, err
+		}
+	}
+	return len(allUpdates), nil
+}
+
+func (e *Engine) handleSyncError(ctx context.Context, req SyncRequestPayload, err error) {
+	errCode := 500
+	var apiErr *gocardless.APIError
+	if errors.As(err, &apiErr) {
+		errCode = apiErr.StatusCode
+		if apiErr.IsConsentExpired() {
+			_ = e.store.MarkAccountExpired(ctx, req.AccountID)
+			period := e.nowFunc().Format("2006-01")
+			if alert, created, _ := e.store.CreateConsentAlert(
+				ctx,
+				req.UserID,
+				req.AccountID,
+				"account_expired",
+				period,
+				"Your 90-day PSD2 bank connection has expired. Please reconnect your account.",
+			); created && alert != nil {
+				e.notifier.Deliver(ctx, notify.NotificationRequest{
+					UserID:   alert.UserID,
+					AlertID:  alert.ID,
+					Type:     alert.Type,
+					Channels: []string{"email", "push"},
+					Message:  alert.Message,
+				})
+			}
+		}
+	}
+	_ = e.store.MarkSyncFailed(ctx, req.SyncID, errCode, err.Error())
+}
+
+func mapGoCardlessTransaction(accountID string, tx gocardless.Transaction, isPending bool, fallbackNow time.Time) dedup.IncomingTransaction {
+	amountCents, _ := gocardless.ParseAmountToCents(tx.TransactionAmount.Amount)
+	var balAfterCents int64
+	if tx.BalanceAfterTransaction != nil {
+		balAfterCents, _ = gocardless.ParseAmountToCents(tx.BalanceAfterTransaction.BalanceAmount.Amount)
+	}
+
+	desc := strings.TrimSpace(tx.RemittanceInformationUnstructured)
+	if desc == "" && len(tx.RemittanceInformationArray) > 0 {
+		desc = strings.TrimSpace(strings.Join(tx.RemittanceInformationArray, " "))
+	}
+
+	bookingDate := parseDateOrFallback(tx.BookingDate, fallbackNow)
+	valueDate := parseDateOrFallback(tx.ValueDate, bookingDate)
+	txDate := bookingDate
+	dateStr := tx.BookingDate
+	if isPending && tx.ValueDate != "" {
+		txDate = valueDate
+		dateStr = tx.ValueDate
+	}
+
+	gcID := strings.TrimSpace(tx.TransactionID)
+	if gcID == "" && isPending {
+		gcID = gocardless.DeterministicPendingID(accountID, dateStr, amountCents, desc)
+	} else if gcID == "" {
+		gcID = tx.InternalTransactionID
+	}
+
+	var credIBAN, debtIBAN string
+	if tx.CreditorAccount != nil {
+		credIBAN = tx.CreditorAccount.IBAN
+	}
+	if tx.DebtorAccount != nil {
+		debtIBAN = tx.DebtorAccount.IBAN
+	}
+
+	currency := tx.TransactionAmount.Currency
+	if currency == "" {
+		currency = "EUR"
+	}
+
+	return dedup.IncomingTransaction{
+		GoCardlessTransactionID: gcID,
+		Date:                    txDate,
+		BookingDate:             bookingDate,
+		ValueDate:               valueDate,
+		AmountCents:             amountCents,
+		BalanceAfterCents:       balAfterCents,
+		Currency:                currency,
+		Description:             desc,
+		CreditorName:            tx.CreditorName,
+		CreditorIBAN:            credIBAN,
+		DebtorName:              tx.DebtorName,
+		DebtorIBAN:              debtIBAN,
+		BankTransactionCode:     tx.BankTransactionCode,
+		IsPending:               isPending,
+	}
+}
+
+func parseDateOrFallback(dateStr string, fallback time.Time) time.Time {
+	s := strings.TrimSpace(dateStr)
+	if len(s) >= 10 {
+		if t, err := time.Parse("2006-01-02", s[:10]); err == nil {
+			return t
+		}
+	}
+	return fallback
 }
 
 // EvaluateScheduledAccount checks whether an active account needs a scheduled sync or a 90-day PSD2 consent alert.
 type ScheduledAction struct {
-	AccountID    string
-	TriggerSync  bool
-	MarkExpired  bool
+	AccountID     string
+	TriggerSync   bool
+	MarkExpired   bool
 	AlertExpiring bool
 }
 
