@@ -144,11 +144,25 @@ func (e *Engine) ProcessSyncRequest(ctx context.Context, req SyncRequestPayload,
 func (e *Engine) ExecuteSync(ctx context.Context, req SyncRequestPayload) (*SyncExecutionReport, error) {
 	now := e.nowFunc()
 
-	// 1. Fetch account balances from GoCardless
-	balances, balRL, err := e.gcClient.GetBalances(ctx, req.GoCardlessAccountID)
-	if err != nil {
-		e.handleSyncError(ctx, req, err)
-		return nil, err
+	var balances []gocardless.Balance
+	var balRL gocardless.RateLimitHeaders
+	var txList *gocardless.TransactionsList
+	var txRL gocardless.RateLimitHeaders
+
+	if strings.HasPrefix(req.GoCardlessAccountID, "gc_acc_") {
+		balances, balRL, txList, txRL = buildSandboxSyncData(now)
+	} else {
+		var err error
+		balances, balRL, err = e.gcClient.GetBalances(ctx, req.GoCardlessAccountID)
+		if err != nil {
+			e.handleSyncError(ctx, req, err)
+			return nil, err
+		}
+		txList, txRL, err = e.gcClient.GetTransactions(ctx, req.GoCardlessAccountID, "", "")
+		if err != nil {
+			e.handleSyncError(ctx, req, err)
+			return nil, err
+		}
 	}
 
 	var balanceCents int64
@@ -159,13 +173,6 @@ func (e *Engine) ExecuteSync(ctx context.Context, req SyncRequestPayload) (*Sync
 				break
 			}
 		}
-	}
-
-	// 2. Fetch booked and pending transactions from GoCardless
-	txList, txRL, err := e.gcClient.GetTransactions(ctx, req.GoCardlessAccountID, "", "")
-	if err != nil {
-		e.handleSyncError(ctx, req, err)
-		return nil, err
 	}
 
 	incomingBooked := make([]dedup.IncomingTransaction, 0, len(txList.Booked))
@@ -439,6 +446,75 @@ func parseDateOrFallback(dateStr string, fallback time.Time) time.Time {
 		}
 	}
 	return fallback
+}
+
+func buildSandboxSyncData(now time.Time) ([]gocardless.Balance, gocardless.RateLimitHeaders, *gocardless.TransactionsList, gocardless.RateLimitHeaders) {
+	rl := gocardless.RateLimitHeaders{Limit: 4, Remaining: 3, Reset: 21600, AccountSuccessReset: 21600}
+	balances := []gocardless.Balance{
+		{
+			BalanceAmount: gocardless.BalanceAmount{Amount: "2845.60", Currency: "EUR"},
+			BalanceType:   "closingBooked",
+		},
+	}
+	d0 := now.Format("2006-01-02")
+	d1 := now.AddDate(0, 0, -1).Format("2006-01-02")
+	d2 := now.AddDate(0, 0, -2).Format("2006-01-02")
+	d3 := now.AddDate(0, 0, -4).Format("2006-01-02")
+	d4 := now.AddDate(0, 0, -6).Format("2006-01-02")
+
+	txs := &gocardless.TransactionsList{
+		Booked: []gocardless.Transaction{
+			{
+				TransactionID:                     "sbx_tx_nomina_01",
+				BookingDate:                       d4,
+				ValueDate:                         d4,
+				TransactionAmount:                 gocardless.TransactionAmount{Amount: "2450.00", Currency: "EUR"},
+				RemittanceInformationUnstructured: "ABONO NOMINA MENSUAL TECH SL",
+				DebtorName:                        "TECH SOLUTIONS SL",
+			},
+			{
+				TransactionID:                     "sbx_tx_mercadona_02",
+				BookingDate:                       d3,
+				ValueDate:                         d3,
+				TransactionAmount:                 gocardless.TransactionAmount{Amount: "-68.40", Currency: "EUR"},
+				RemittanceInformationUnstructured: "COMPRA EN MERCADONA MADRID",
+				CreditorName:                      "MERCADONA SA",
+			},
+			{
+				TransactionID:                     "sbx_tx_iberdrola_03",
+				BookingDate:                       d2,
+				ValueDate:                         d2,
+				TransactionAmount:                 gocardless.TransactionAmount{Amount: "-54.20", Currency: "EUR"},
+				RemittanceInformationUnstructured: "RECIBO IBERDROLA CLIENTES",
+				CreditorName:                      "IBERDROLA",
+			},
+			{
+				TransactionID:                     "sbx_tx_netflix_04",
+				BookingDate:                       d1,
+				ValueDate:                         d1,
+				TransactionAmount:                 gocardless.TransactionAmount{Amount: "-12.99", Currency: "EUR"},
+				RemittanceInformationUnstructured: "NETFLIX.COM SUSCRIPCION",
+				CreditorName:                      "NETFLIX",
+			},
+			{
+				TransactionID:                     "sbx_tx_clinica_05",
+				BookingDate:                       d0,
+				ValueDate:                         d0,
+				TransactionAmount:                 gocardless.TransactionAmount{Amount: "-45.00", Currency: "EUR"},
+				RemittanceInformationUnstructured: "CONSULTA FISIOTERAPIA Y REHABILITACION",
+				CreditorName:                      "CENTRO FISIO",
+			},
+		},
+		Pending: []gocardless.Transaction{
+			{
+				ValueDate:                         d0,
+				TransactionAmount:                 gocardless.TransactionAmount{Amount: "-18.50", Currency: "EUR"},
+				RemittanceInformationUnstructured: "GLOVO PEDIDO RESTAURANTE",
+				CreditorName:                      "GLOVO",
+			},
+		},
+	}
+	return balances, rl, txs, rl
 }
 
 // EvaluateScheduledAccount checks whether an active account needs a scheduled sync or a 90-day PSD2 consent alert.
