@@ -185,12 +185,30 @@ func (e *Engine) ExecuteSync(ctx context.Context, req SyncRequestPayload) (*Sync
 		incomingPending = append(incomingPending, mapGoCardlessTransaction(req.AccountID, p, true, now))
 	}
 
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("sync transactions fetched",
+			"account_id", req.AccountID,
+			"booked_count", len(txList.Booked),
+			"pending_count", len(txList.Pending),
+			"balance_cents", balanceCents,
+		)
+	}
+
 	// 3. Reconcile against existing transactions in DB (exact ID + ±3 day fuzzy match for pending -> booked)
 	existing, err := e.store.ListAccountTransactions(ctx, req.AccountID)
 	if err != nil {
 		return nil, err
 	}
 	rec := dedup.Reconcile(existing, incomingBooked, incomingPending)
+
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("sync deduplication completed",
+			"account_id", req.AccountID,
+			"new_count", len(rec.NewTransactions),
+			"promoted_count", len(rec.PromotedPendingToBook),
+			"deleted_pending_count", len(rec.DeletedPendingIDs),
+		)
+	}
 
 	// 4. Detect internal transfers and classify remaining transactions via 3-tier pipeline (Manual -> Keyword -> Jev)
 	userIBANs, _ := e.store.ListUserIBANs(ctx, req.UserID)
@@ -222,6 +240,14 @@ func (e *Engine) ExecuteSync(ctx context.Context, req SyncRequestPayload) (*Sync
 	}
 
 	classifications := e.jevClient.Classify(ctx, toClassify, manualRules, categories)
+
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("sync classification completed",
+			"account_id", req.AccountID,
+			"requested_count", len(toClassify),
+			"classified_count", len(classifications),
+		)
+	}
 
 	catTransfers := "cat_transfers"
 	srcKeyword := ai.SourceKeyword

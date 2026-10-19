@@ -1,8 +1,10 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,6 +30,7 @@ type Config struct {
 	APNSKeyID            string
 	APNSTeamID           string
 	SchedulerInterval    time.Duration
+	LogLevel             string
 }
 
 // Load reads environment variables and returns a populated worker Config.
@@ -46,6 +49,15 @@ func Load() Config {
 	}
 
 	jevAPIKey := getEnv("OPENROUTER_API_KEY", getEnv("JEV_API_KEY", ""))
+
+	logLevel := getEnv("LOG_LEVEL", "")
+	if logLevel == "" {
+		if debug := getEnv("DEBUG", ""); debug == "true" || debug == "1" {
+			logLevel = "debug"
+		} else {
+			logLevel = "info"
+		}
+	}
 
 	return Config{
 		MongoDBURI:           getEnv("MONGODB_URI", "mongodb://localhost:27017/finperk?replicaSet=rs0"),
@@ -68,7 +80,33 @@ func Load() Config {
 		APNSKeyID:            getEnv("APNS_KEY_ID", ""),
 		APNSTeamID:           getEnv("APNS_TEAM_ID", ""),
 		SchedulerInterval:    schedInt,
+		LogLevel:             logLevel,
 	}
+}
+
+// ParseLogLevel converts a level string into a slog.Level.
+func ParseLogLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// SetupLogger initializes and sets the default slog.Logger according to levelStr.
+func SetupLogger(levelStr string) *slog.Logger {
+	level := ParseLogLevel(levelStr)
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	})
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+	return logger
 }
 
 func getEnv(key, fallback string) string {

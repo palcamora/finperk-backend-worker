@@ -307,19 +307,32 @@ func (c *JevClient) callJevDecision(ctx context.Context, tx TransactionInput, ca
 		req.Header.Set("X-Title", "Finperk")
 	}
 
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("jev ai request", "url", c.apiURL, "model", c.model, "body", string(raw))
+	}
+
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("jev: read response: %w", err)
+	}
+
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("jev ai response", "url", c.apiURL, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "body", string(respBytes))
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("jev: unexpected status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("jev: unexpected status %d: %s", resp.StatusCode, string(respBytes))
 	}
 
 	var decoded jevDecisionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := json.Unmarshal(respBytes, &decoded); err != nil {
 		return "", err
 	}
 	if ans, ok := decoded.Answers["category"]; ok && ans.Choice != "" {
@@ -396,19 +409,32 @@ func (c *JevClient) callOpenRouterDecision(ctx context.Context, tx TransactionIn
 	req.Header.Set("HTTP-Referer", "https://app.finperk.es")
 	req.Header.Set("X-Title", "Finperk")
 
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("openrouter chat request", "url", c.apiURL, "model", c.model, "body", string(raw))
+	}
+
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("openrouter: read response: %w", err)
+	}
+
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("openrouter chat response", "url", c.apiURL, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "body", string(respBytes))
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("openrouter: unexpected status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("openrouter: unexpected status %d: %s", resp.StatusCode, string(respBytes))
 	}
 
 	var chatResp openRouterChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := json.Unmarshal(respBytes, &chatResp); err != nil {
 		return "", err
 	}
 	if len(chatResp.Choices) == 0 {

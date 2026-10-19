@@ -87,6 +87,9 @@ func (b *NATSWorkerBus) StartConsumers(ctx context.Context, eng *Engine) error {
 		SubjectSyncRequest,
 		ConsumerSyncWorker,
 		func(msg *nats.Msg) {
+			if slog.Default().Enabled(ctx, slog.LevelDebug) {
+				slog.Debug("nats message received", "subject", msg.Subject, "data", string(msg.Data))
+			}
 			var payload SyncRequestPayload
 			if err := json.Unmarshal(msg.Data, &payload); err != nil {
 				slog.Error("invalid sync request payload", "error", err)
@@ -129,6 +132,9 @@ func (b *NATSWorkerBus) StartConsumers(ctx context.Context, eng *Engine) error {
 		SubjectNotifyRequest,
 		ConsumerNotifyWorker,
 		func(msg *nats.Msg) {
+			if slog.Default().Enabled(ctx, slog.LevelDebug) {
+				slog.Debug("nats message received", "subject", msg.Subject, "data", string(msg.Data))
+			}
 			var req notify.NotificationRequest
 			if err := json.Unmarshal(msg.Data, &req); err != nil {
 				_ = msg.Term()
