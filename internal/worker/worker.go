@@ -649,6 +649,12 @@ func (e *Engine) Run(ctx context.Context) error {
 	defer jevRetryTicker.Stop()
 
 	slog.Info("finperk backend-worker started", "scheduler_interval", e.schedulerInterval.String())
+	go func() {
+		time.Sleep(1 * time.Second)
+		if count, err := e.RetryUncategorized(ctx); err == nil && count > 0 {
+			slog.Info("categorized historical transactions via Jev", "count", count)
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():

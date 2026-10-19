@@ -55,7 +55,7 @@ func Load() Config {
 		JevProvider:          getEnv("JEV_PROVIDER", "openrouter"),
 		JevModel:             getEnv("JEV_MODEL", "typesafe/jev-1.14"),
 		JevAPIKey:            jevAPIKey,
-		JevAPIURL:            getEnv("JEV_API_URL", "https://openrouter.ai/api/v1/chat/completions"),
+		JevAPIURL:            getEnv("JEV_API_URL", "https://openrouter.ai/api/alpha/decisions"),
 		NATSURL:              getEnv("NATS_URL", "nats://localhost:4222"),
 		NotificationsEnabled: notifEnabled,
 		SMTPHost:             getEnv("SMTP_HOST", ""),

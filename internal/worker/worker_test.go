@@ -136,6 +136,68 @@ func TestOpenRouterCategorization(t *testing.T) {
 	}
 }
 
+func TestJevOpenRouterDecisionsEndpoint(t *testing.T) {
+	var capturedAuth, capturedModel string
+	var capturedCriteria map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		var body struct {
+			Model     string `json:"model"`
+			Questions map[string]struct {
+				Type     string            `json:"type"`
+				Criteria map[string]string `json:"criteria"`
+			} `json:"questions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		capturedModel = body.Model
+		if q, ok := body.Questions["category"]; ok {
+			capturedCriteria = q.Criteria
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "typesafe/jev-1.14",
+			"answers": map[string]any{
+				"category": map[string]any{
+					"type":       "choice",
+					"choice":     "cat_shopping",
+					"confidence": 1.0,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	jevClient := ai.NewJevClient(
+		srv.URL+"/api/alpha/decisions",
+		"openrouter-key-123",
+		srv.Client(),
+		ai.WithProvider(ai.ProviderOpenRouter),
+		ai.WithModel("typesafe/jev-1.14"),
+	)
+
+	categories := []ai.CategoryOption{
+		{ID: "cat_shopping", Name: "Shopping", Keywords: []string{"mercadona"}},
+		{ID: "cat_health", Name: "Health", Keywords: []string{"farmacia"}},
+	}
+	inputs := []ai.TransactionInput{
+		{ID: "tx-dec-1", Description: "SUPERMERCADO DIA MADRID", AmountCents: -2500},
+	}
+
+	res := jevClient.Classify(context.Background(), inputs, nil, categories)
+	if res["tx-dec-1"].CategoryID == nil || *res["tx-dec-1"].CategoryID != "cat_shopping" || *res["tx-dec-1"].CategorySource != ai.SourceJev {
+		t.Fatalf("expected tx-dec-1 to be classified via Jev decisions as cat_shopping, got %+v", res["tx-dec-1"])
+	}
+	if capturedAuth != "Bearer openrouter-key-123" {
+		t.Fatalf("expected Authorization header 'Bearer openrouter-key-123', got %q", capturedAuth)
+	}
+	if capturedModel != "typesafe/jev-1.14" {
+		t.Fatalf("expected model 'typesafe/jev-1.14', got %q", capturedModel)
+	}
+	if capturedCriteria == nil || capturedCriteria["cat_shopping"] == "" {
+		t.Fatalf("expected criteria for cat_shopping, got %+v", capturedCriteria)
+	}
+}
+
 func TestOptionalNotifications(t *testing.T) {
 	disabledDisp := notify.NewDispatcherFromConfig(notify.Config{
 		Enabled: false,

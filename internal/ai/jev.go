@@ -23,8 +23,8 @@ const (
 	// ProviderOpenRouter uses OpenRouter's OpenAI-compatible Chat Completions endpoint (/api/v1/chat/completions).
 	ProviderOpenRouter = "openrouter"
 
-	// DefaultOpenRouterURL is the default OpenRouter Chat Completions endpoint.
-	DefaultOpenRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+	// DefaultOpenRouterURL is the OpenRouter decisions endpoint for Jev models.
+	DefaultOpenRouterURL = "https://openrouter.ai/api/alpha/decisions"
 	// DefaultOpenRouterModel is the default Jev model on OpenRouter.
 	DefaultOpenRouterModel = "typesafe/jev-1.14"
 	// DefaultJevModel is the default model used when calling the native Jev endpoint.
@@ -116,7 +116,7 @@ func NewJevClient(apiURL, apiKey string, hc *http.Client, opts ...JevOption) *Je
 	}
 
 	if c.provider == ProviderOpenRouter {
-		if c.apiURL == "" || strings.Contains(lowerURL, "jevfast.com") || strings.Contains(lowerURL, "api.jev.ai") {
+		if c.apiURL == "" || strings.Contains(lowerURL, "jevfast.com") || strings.Contains(lowerURL, "api.jev.ai") || (strings.Contains(lowerURL, "openrouter.ai") && strings.Contains(lowerURL, "/chat/completions") && strings.Contains(strings.ToLower(c.model), "jev")) {
 			c.apiURL = DefaultOpenRouterURL
 		}
 		if c.model == "" {
@@ -184,42 +184,64 @@ func (c *JevClient) Classify(
 	}
 
 	// Tier 3: Jev Decision Model (native Jev or via OpenRouter)
-	var circuitBreakErr error
+	type classifyResult struct {
+		id    string
+		catID string
+		err   error
+	}
+
+	concurrency := 5
+	if len(pendingJev) < concurrency {
+		concurrency = len(pendingJev)
+	}
+	if concurrency == 0 {
+		concurrency = 1
+	}
+
+	ch := make(chan classifyResult, len(pendingJev))
+	sem := make(chan struct{}, concurrency)
 	for _, tx := range pendingJev {
-		if circuitBreakErr != nil {
-			results[tx.ID] = ClassificationResult{CategoryID: nil, CategorySource: nil}
+		sem <- struct{}{}
+		go func(t TransactionInput) {
+			defer func() { <-sem }()
+			catID, err := c.callDecisionModel(ctx, t, categories)
+			ch <- classifyResult{id: t.ID, catID: catID, err: err}
+		}(tx)
+	}
+
+	for i := 0; i < len(pendingJev); i++ {
+		res := <-ch
+		if res.err != nil || !validCats[res.catID] {
+			if res.err != nil {
+				slog.Warn("AI transaction classification failed for transaction", "id", res.id, "error", res.err)
+			}
+			results[res.id] = ClassificationResult{CategoryID: nil, CategorySource: nil}
 			continue
 		}
-		catID, err := c.callDecisionModel(ctx, tx, optionIDs)
-		if err != nil {
-			slog.Warn("AI transaction classification failed, marking remaining transactions as uncategorized", "error", err)
-			circuitBreakErr = err
-			results[tx.ID] = ClassificationResult{CategoryID: nil, CategorySource: nil}
-			continue
-		}
-		if !validCats[catID] {
-			results[tx.ID] = ClassificationResult{CategoryID: nil, CategorySource: nil}
-			continue
-		}
-		cid := catID
+		cid := res.catID
 		src := SourceJev
-		results[tx.ID] = ClassificationResult{CategoryID: &cid, CategorySource: &src}
+		results[res.id] = ClassificationResult{CategoryID: &cid, CategorySource: &src}
 	}
 
 	return results
 }
 
-func (c *JevClient) callDecisionModel(ctx context.Context, tx TransactionInput, optionIDs []string) (string, error) {
-	if c.provider == ProviderOpenRouter {
+func (c *JevClient) callDecisionModel(ctx context.Context, tx TransactionInput, categories []CategoryOption) (string, error) {
+	if strings.Contains(c.apiURL, "/chat/completions") {
+		optionIDs := make([]string, 0, len(categories))
+		for _, cat := range categories {
+			optionIDs = append(optionIDs, cat.ID)
+		}
 		return c.callOpenRouterDecision(ctx, tx, optionIDs)
 	}
-	return c.callJevDecision(ctx, tx, optionIDs)
+	return c.callJevDecision(ctx, tx, categories)
 }
 
 type jevChoiceQuestion struct {
-	Type         string   `json:"type"`
-	Instructions string   `json:"instructions"`
-	Options      []string `json:"options"`
+	Type         string            `json:"type"`
+	Instructions string            `json:"instructions"`
+	Criteria     map[string]string `json:"criteria,omitempty"`
+	Options      []string          `json:"options,omitempty"`
 }
 
 type jevDecisionRequest struct {
@@ -229,15 +251,30 @@ type jevDecisionRequest struct {
 }
 
 type jevDecisionResponse struct {
-	Category  string `json:"category"`
+	Answers map[string]struct {
+		Type   string `json:"type"`
+		Choice string `json:"choice"`
+	} `json:"answers"`
+	Category string `json:"category"`
 	Decisions map[string]struct {
 		Choice string `json:"choice"`
 	} `json:"decisions"`
 }
 
-func (c *JevClient) callJevDecision(ctx context.Context, tx TransactionInput, optionIDs []string) (string, error) {
+func (c *JevClient) callJevDecision(ctx context.Context, tx TransactionInput, categories []CategoryOption) (string, error) {
 	if c.apiURL == "" || c.apiKey == "" {
 		return "", errors.New("jev: API URL or key not configured")
+	}
+
+	criteria := make(map[string]string, len(categories))
+	options := make([]string, 0, len(categories))
+	for _, cat := range categories {
+		desc := cat.Name
+		if len(cat.Keywords) > 0 {
+			desc += ": " + strings.Join(cat.Keywords, ", ")
+		}
+		criteria[cat.ID] = desc
+		options = append(options, cat.ID)
 	}
 
 	state := fmt.Sprintf("description: %s | creditor: %s | amount_cents: %d", tx.Description, tx.Creditor, tx.AmountCents)
@@ -248,7 +285,8 @@ func (c *JevClient) callJevDecision(ctx context.Context, tx TransactionInput, op
 			"category": {
 				Type:         "choice",
 				Instructions: "Select the single most accurate global category ID for this bank transaction.",
-				Options:      optionIDs,
+				Criteria:     criteria,
+				Options:      options,
 			},
 		},
 	}
@@ -264,6 +302,10 @@ func (c *JevClient) callJevDecision(ctx context.Context, tx TransactionInput, op
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	if c.provider == ProviderOpenRouter || strings.Contains(c.apiURL, "openrouter.ai") {
+		req.Header.Set("HTTP-Referer", "https://app.finperk.es")
+		req.Header.Set("X-Title", "Finperk")
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -272,12 +314,16 @@ func (c *JevClient) callJevDecision(ctx context.Context, tx TransactionInput, op
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("jev: unexpected status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("jev: unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var decoded jevDecisionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return "", err
+	}
+	if ans, ok := decoded.Answers["category"]; ok && ans.Choice != "" {
+		return ans.Choice, nil
 	}
 	if decoded.Category != "" {
 		return decoded.Category, nil
