@@ -23,8 +23,8 @@ const (
 
 	// DefaultOpenRouterURL is the default OpenRouter Chat Completions endpoint.
 	DefaultOpenRouterURL = "https://openrouter.ai/api/v1/chat/completions"
-	// DefaultOpenRouterModel is the default model used when calling OpenRouter if none is specified.
-	DefaultOpenRouterModel = "google/gemini-2.5-flash"
+	// DefaultOpenRouterModel is the default Jev model on OpenRouter.
+	DefaultOpenRouterModel = "typesafe/jev-1.14"
 	// DefaultJevModel is the default model used when calling the native Jev endpoint.
 	DefaultJevModel = "jev-latest"
 )

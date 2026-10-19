@@ -45,15 +45,17 @@ func Load() Config {
 		notifEnabled = false
 	}
 
+	jevAPIKey := getEnv("OPENROUTER_API_KEY", getEnv("JEV_API_KEY", ""))
+
 	return Config{
 		MongoDBURI:           getEnv("MONGODB_URI", "mongodb://localhost:27017/finperk?replicaSet=rs0"),
 		GoCardlessSecretID:   getEnv("GOCARDLESS_SECRET_ID", ""),
 		GoCardlessSecretKey:  getEnv("GOCARDLESS_SECRET_KEY", ""),
 		GoCardlessTokenStore: getEnv("GOCARDLESS_TOKEN_STORE", "nats"),
-		JevProvider:          getEnv("JEV_PROVIDER", ""),
-		JevModel:             getEnv("JEV_MODEL", ""),
-		JevAPIKey:            getEnv("JEV_API_KEY", ""),
-		JevAPIURL:            getEnv("JEV_API_URL", "https://api.jevfast.com/v1/decisions"),
+		JevProvider:          getEnv("JEV_PROVIDER", "openrouter"),
+		JevModel:             getEnv("JEV_MODEL", "typesafe/jev-1.14"),
+		JevAPIKey:            jevAPIKey,
+		JevAPIURL:            getEnv("JEV_API_URL", "https://openrouter.ai/api/v1/chat/completions"),
 		NATSURL:              getEnv("NATS_URL", "nats://localhost:4222"),
 		NotificationsEnabled: notifEnabled,
 		SMTPHost:             getEnv("SMTP_HOST", ""),
