@@ -33,10 +33,23 @@ Copy `.env.example` to `.env`:
 | `NATS_URL` | `nats://localhost:4222` | NATS JetStream URL |
 | `GOCARDLESS_SECRET_ID` | — | GoCardless API Secret ID |
 | `GOCARDLESS_SECRET_KEY` | — | GoCardless API Secret Key |
-| `JEV_API_URL` | `https://api.typesafe.ai` | Jev classification API base URL |
-| `JEV_API_KEY` | — | Jev API key |
-| `SYNC_SCHEDULER_INTERVAL` | `12h` | Cron interval for automatic account syncs |
-| `SMTP_HOST` / `SMTP_PORT` | `localhost` / `1025` | SMTP server for email alerts |
+| `GOCARDLESS_TOKEN_STORE` | `nats` | Shared GoCardless token store (`nats` or `mongo`) |
+| `JEV_PROVIDER` | `openrouter` | Jev provider (`openrouter` or `jev`) |
+| `JEV_MODEL` | `typesafe/jev-1.14` | Model slug when using OpenRouter |
+| `JEV_API_URL` | `https://openrouter.ai/api/v1/chat/completions` | Jev / OpenRouter endpoint |
+| `OPENROUTER_API_KEY` / `JEV_API_KEY` | — | Single API key for OpenRouter or Jev |
+| `SCHEDULER_INTERVAL` | `12h` | Cron interval for automatic account syncs |
+| `NOTIFICATIONS_ENABLED` | `false` | Optional external email/push notifications |
+
+## Local Sandbox Sync Data
+
+`backend-worker` supports both local simulated Sandbox accounts and real GoCardless Sandbox accounts (`SANDBOXFINANCE_SFIN0000`):
+
+- **Simulated Local Sandbox Accounts (`gc_acc_*`)**: When syncing an account created without external GoCardless credentials (`gocardless_account_id` prefixed with `gc_acc_`), `buildSandboxSyncData` (`internal/worker/worker.go`) generates a realistic Spanish dataset without calling the external GoCardless API:
+  - **Closing Booked Balance**: `2,845.60 EUR` (`284560` cents)
+  - **5 Booked Transactions**: Salary (`+2,450.00 EUR`, `TECH SOLUTIONS SL`), Mercadona (`-68.40 EUR`), Iberdrola (`-54.20 EUR`), Netflix (`-12.99 EUR`), and Clínica Fisioterapia (`-45.00 EUR`).
+  - **1 Pending Transaction**: Glovo (`-18.50 EUR`, provisional `is_pending: true`).
+- **Real GoCardless Sandbox Accounts (`SANDBOXFINANCE_SFIN0000`)**: When `GOCARDLESS_SECRET_ID` and `GOCARDLESS_SECRET_KEY` are set, the worker fetches real Sandbox balances and movements from `https://bankaccountdata.gocardless.com/api/v2/accounts/{id}/balances/` and `/transactions/`, reconciles pending movements, and classifies booked movements through the 3-tier pipeline (`manual` → `keyword` → `jev` via OpenRouter).
 
 ## Development Commands
 

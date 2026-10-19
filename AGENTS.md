@@ -39,6 +39,9 @@ backend-worker/
    - Save new transactions, remove reconciled pending transactions, update account balance, and rebuild `spending_summaries` inside a single MongoDB ACID session.
    - Budget alerts (`budget_threshold` at 80%, `budget_exceeded` at 100%) are deduplicated by `user_id + budget_id + type + period (YYYY-MM)` and always saved in MongoDB for in-app viewing.
    - External notifications (SMTP email, FCM Android, APNs iOS) are strictly optional (`NOTIFICATIONS_ENABLED=false` by default) and each channel activates only if its credentials are provided.
+7. **Local Sandbox Sync Data (`buildSandboxSyncData`)** (`internal/worker/worker.go`):
+   - If `req.GoCardlessAccountID` starts with `gc_acc_` (offline local simulator mode), `ExecuteSync` uses `buildSandboxSyncData` to generate 5 booked Spanish demo transactions (`+2450.00 EUR` payroll, `-68.40 EUR` Mercadona, `-54.20 EUR` Iberdrola, `-12.99 EUR` Netflix, `-45.00 EUR` Clínica Fisio), 1 pending transaction (`-18.50 EUR` Glovo), and a balance of `284560` cents (`2,845.60 EUR`).
+   - Otherwise, `ExecuteSync` calls the real GoCardless API (`/balances/` and `/transactions/`) for `SANDBOXFINANCE_SFIN0000` or production Spanish banks.
 
 ## Commands
 
