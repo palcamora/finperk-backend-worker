@@ -107,14 +107,27 @@ func Reconcile(existing []StoredTransaction, incomingBooked, incomingPending []I
 		res.DeletedPendingIDs = append(res.DeletedPendingIDs, st.ID)
 	}
 
-	// 3. Collect genuinely new booked and pending transactions
+	// 3. Collect genuinely new booked and pending transactions (avoiding duplicate IDs in the same batch)
+	seenGCIDs := make(map[string]bool)
 	for i, b := range incomingBooked {
 		if !seenBookedIdx[i] {
+			if b.GoCardlessTransactionID != "" {
+				if seenGCIDs[b.GoCardlessTransactionID] {
+					continue
+				}
+				seenGCIDs[b.GoCardlessTransactionID] = true
+			}
 			res.NewTransactions = append(res.NewTransactions, b)
 		}
 	}
 	for i, p := range incomingPending {
 		if !seenPendingIdx[i] {
+			if p.GoCardlessTransactionID != "" {
+				if seenGCIDs[p.GoCardlessTransactionID] {
+					continue
+				}
+				seenGCIDs[p.GoCardlessTransactionID] = true
+			}
 			res.NewTransactions = append(res.NewTransactions, p)
 		}
 	}

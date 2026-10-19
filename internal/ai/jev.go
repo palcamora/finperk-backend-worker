@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -90,7 +92,7 @@ type JevClient struct {
 // "openrouter.ai" or "/chat/completions", or when configured via WithProvider("openrouter")).
 func NewJevClient(apiURL, apiKey string, hc *http.Client, opts ...JevOption) *JevClient {
 	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+		hc = &http.Client{Timeout: 5 * time.Second}
 	}
 	c := &JevClient{
 		apiURL:     strings.TrimSpace(apiURL),
@@ -182,10 +184,20 @@ func (c *JevClient) Classify(
 	}
 
 	// Tier 3: Jev Decision Model (native Jev or via OpenRouter)
+	var circuitBreakErr error
 	for _, tx := range pendingJev {
+		if circuitBreakErr != nil {
+			results[tx.ID] = ClassificationResult{CategoryID: nil, CategorySource: nil}
+			continue
+		}
 		catID, err := c.callDecisionModel(ctx, tx, optionIDs)
-		if err != nil || !validCats[catID] {
-			// Jev unavailable -> store uncategorized (null) to be retried by background job
+		if err != nil {
+			slog.Warn("AI transaction classification failed, marking remaining transactions as uncategorized", "error", err)
+			circuitBreakErr = err
+			results[tx.ID] = ClassificationResult{CategoryID: nil, CategorySource: nil}
+			continue
+		}
+		if !validCats[catID] {
 			results[tx.ID] = ClassificationResult{CategoryID: nil, CategorySource: nil}
 			continue
 		}
@@ -345,7 +357,8 @@ func (c *JevClient) callOpenRouterDecision(ctx context.Context, tx TransactionIn
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("openrouter: unexpected status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("openrouter: unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var chatResp openRouterChatResponse

@@ -400,11 +400,12 @@ func mapGoCardlessTransaction(accountID string, tx gocardless.Transaction, isPen
 		dateStr = tx.ValueDate
 	}
 
-	gcID := strings.TrimSpace(tx.TransactionID)
-	if gcID == "" && isPending {
+	gcID := strings.TrimSpace(tx.InternalTransactionID)
+	if gcID == "" {
+		gcID = strings.TrimSpace(tx.TransactionID)
+	}
+	if gcID == "" {
 		gcID = gocardless.DeterministicPendingID(accountID, dateStr, amountCents, desc)
-	} else if gcID == "" {
-		gcID = tx.InternalTransactionID
 	}
 
 	var credIBAN, debtIBAN string

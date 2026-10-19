@@ -327,13 +327,21 @@ func (s *MongoWorkerStore) ApplySyncOutcome(ctx context.Context, outcome SyncOut
 			affectedPeriods[prom.Incoming.Date.Format("2006-01")] = true
 		}
 
-		// 4. Insert genuinely new transactions
+		// 4. Insert genuinely new transactions (upsert by account_id + gocardless_transaction_id to prevent E11000 transaction abortion)
+		seenBatchGCIDs := make(map[string]bool)
 		for _, nt := range outcome.NewTransactions {
+			gcID := nt.Incoming.GoCardlessTransactionID
+			if gcID != "" {
+				if seenBatchGCIDs[gcID] {
+					continue
+				}
+				seenBatchGCIDs[gcID] = true
+			}
 			doc := mongoTxDoc{
 				ID:                      genID(),
 				UserID:                  outcome.UserID,
 				AccountID:               outcome.AccountID,
-				GoCardlessTransactionID: nt.Incoming.GoCardlessTransactionID,
+				GoCardlessTransactionID: gcID,
 				Date:                    nt.Incoming.Date,
 				BookingDate:             nt.Incoming.BookingDate,
 				ValueDate:               nt.Incoming.ValueDate,
@@ -354,9 +362,21 @@ func (s *MongoWorkerStore) ApplySyncOutcome(ctx context.Context, outcome SyncOut
 				CreatedAt:               now,
 				UpdatedAt:               now,
 			}
-			_, err := txColl.InsertOne(sessCtx, doc)
-			if err != nil && !mongo.IsDuplicateKeyError(err) {
-				return nil, err
+			if gcID != "" {
+				_, err := txColl.UpdateOne(
+					sessCtx,
+					bson.M{"account_id": outcome.AccountID, "gocardless_transaction_id": gcID},
+					bson.M{"$setOnInsert": doc},
+					options.Update().SetUpsert(true),
+				)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				_, err := txColl.InsertOne(sessCtx, doc)
+				if err != nil {
+					return nil, err
+				}
 			}
 			if !nt.Incoming.IsPending {
 				affectedPeriods[nt.Incoming.Date.Format("2006-01")] = true
