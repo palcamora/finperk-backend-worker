@@ -1,0 +1,89 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/finperk/backend-worker
+  pullPolicy: IfNotPresent
+  tag: "" # Defaults to Chart.appVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 8081
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+config:
+  workerHealthPort: "8081"
+  logLevel: "info"
+  natsUrl: "nats://finperk-nats:4222"
+  gocardlessTokenStore: "nats" # "nats" or "mongo"
+  jevProvider: "openrouter" # "openrouter" or "jev"
+  jevModel: "typesafe/jev-1.14"
+  jevApiUrl: "https://openrouter.ai/api/alpha/decisions"
+  schedulerInterval: "12h"
+  notificationsEnabled: "false"
+  smtpHost: ""
+  smtpPort: "587"
+  smtpFrom: ""
+  apnsKeyId: ""
+  apnsTeamId: ""
+
+secrets:
+  # Set existingSecret to use an externally managed Secret (e.g. SealedSecret / ExternalSecret)
+  existingSecret: ""
+  mongodbUri: "mongodb://finperk-mongodb-0.finperk-mongodb-headless:27017/finperk?replicaSet=rs0"
+  gocardlessSecretId: ""
+  gocardlessSecretKey: ""
+  openrouterApiKey: ""
+  jevApiKey: ""
+  smtpUser: ""
+  smtpPassword: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: finperk-worker
+description: Helm chart for Finperk Background Worker (GoCardless sync, Jev AI categorization, notifications)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
